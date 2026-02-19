@@ -739,6 +739,7 @@ type FetchJsonInput = {
   sessionScope?: string | undefined;
   requestProfile?: 'default' | 'oauth_token';
   captchaRetryCount?: number;
+  captchaChallengeUrl?: string | undefined;
 };
 
 type VintedHttpBackend = 'auto' | 'fetch' | 'curl';
@@ -1137,6 +1138,7 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
     sessionScope,
     requestProfile = 'default',
     captchaRetryCount = 0,
+    captchaChallengeUrl,
   } = input;
   const headersWithIncognia = await withAutoIncogniaRequestHeader({
     url,
@@ -1189,28 +1191,33 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
 
   const text = await res.text();
   if (!res.ok) {
-    const challengeUrl = extractCaptchaDeliveryUrl(text);
-    if (challengeUrl && captchaRetryCount < 1) {
+    const challengeUrlFromResponse = extractCaptchaDeliveryUrl(text);
+    if (challengeUrlFromResponse && captchaRetryCount < 1) {
       logger.warn(
         {
           status: res.status,
           method,
           url,
-          challengeUrl,
+          challengeUrl: challengeUrlFromResponse,
           sessionScope: sessionScope ?? null,
         },
         'Vinted returned captcha challenge; priming session and retrying once',
       );
       await primeSessionViaCaptchaDelivery({
         requestUrl: url,
-        challengeUrl,
+        challengeUrl: challengeUrlFromResponse,
         sessionScope,
         requestProfile,
       });
-      return fetchJson({ ...normalizedInput, captchaRetryCount: captchaRetryCount + 1 });
+      return fetchJson({
+        ...normalizedInput,
+        captchaRetryCount: captchaRetryCount + 1,
+        captchaChallengeUrl: challengeUrlFromResponse,
+      });
     }
-    if (challengeUrl) {
-      return err(toVintedCaptchaChallengeError(challengeUrl));
+    const effectiveChallengeUrl = challengeUrlFromResponse ?? captchaChallengeUrl;
+    if (effectiveChallengeUrl) {
+      return err(toVintedCaptchaChallengeError(effectiveChallengeUrl));
     }
 
     if (backend === 'auto' && (res.status === 401 || res.status === 403)) {

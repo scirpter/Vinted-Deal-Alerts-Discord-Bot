@@ -505,6 +505,36 @@ describe('VintedClient action request compatibility', () => {
     ).toBe(false);
   });
 
+  it('keeps first challenge url when retry response omits captcha url', async () => {
+    process.env.VINTED_HTTP_BACKEND = 'fetch';
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=test-missing-second-url';
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
+      .mockResolvedValueOnce(
+        new Response('<html>challenge</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+
+    const res = await new VintedClient().buildCheckout({
+      region: 'nl',
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      itemId: 89n,
+      pickupPoint: null,
+      sessionKey: 'user-89',
+    });
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value.checkoutUrl).toBeNull();
+    expect(res.value.challengeUrl).toBe(challengeUrl);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('runs checkout preflight and retries when checkout build stays blocked', async () => {
     process.env.VINTED_HTTP_BACKEND = 'fetch';
     const fetchMock = vi
