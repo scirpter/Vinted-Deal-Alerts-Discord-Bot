@@ -173,6 +173,10 @@ function withMergedPurchaseIdCandidates(
   return { ...base, purchaseIdCandidates: merged };
 }
 
+function hasChallengeUrl(result: { challengeUrl?: string | null }): boolean {
+  return Boolean(result.challengeUrl?.trim());
+}
+
 function extractCaptchaChallengeUrl(message: string): string | null {
   const normalized = message.replace(/\\\//g, '/');
   const match = normalized.match(/https?:\/\/[^\s"'<>]*captcha-delivery\.com\/captcha\/[^\s"'<>]*/i);
@@ -388,6 +392,19 @@ export async function attemptCheckoutBuild(
         return { status: 'ready', checkoutUrl: firstAttempt.value.checkoutUrl };
       }
       const challengeUrl = firstAttempt.value.challengeUrl?.trim() || undefined;
+      if (challengeUrl) {
+        logCheckoutStatus(input, 'blocked', {
+          source: 'missing_checkout_url',
+          checkoutItemId: checkoutItemIdValue,
+          challengeUrl,
+        });
+        return {
+          status: 'blocked',
+          source: 'missing_checkout_url',
+          purchaseIdCandidates: [checkoutItemId],
+          challengeUrl,
+        };
+      }
       if (hasPickupPoint) {
         const fallbackResult = await attemptFallbackWithoutPickup('missing_checkout_url');
         if (fallbackResult.status === 'blocked' && !fallbackResult.challengeUrl && challengeUrl) {
@@ -430,6 +447,7 @@ export async function attemptCheckoutBuild(
 
   const shouldRetryWithOriginalItemId =
     transactionId !== input.itemId &&
+    !(firstResult.status === 'blocked' && hasChallengeUrl(firstResult)) &&
     (firstResult.status === 'blocked' ||
       firstResult.status === 'failed' ||
       firstResult.status === 'invalid_pickup_point');
@@ -467,6 +485,7 @@ export async function attemptCheckoutBuild(
 
 function shouldAttemptOptimisticSubmit(result: CheckoutBuildResult): boolean {
   if (result.status !== 'blocked') return false;
+  if (hasChallengeUrl(result)) return false;
   const source = result.source?.toLowerCase().trim() ?? '';
   if (source !== 'missing_checkout_url' && source !== 'fallback_missing_checkout_url') {
     return false;

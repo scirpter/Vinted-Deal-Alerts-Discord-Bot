@@ -161,6 +161,26 @@ describe('attemptCheckoutBuild', () => {
     });
   });
 
+  it('does not retry without pickup when checkout build is blocked with challenge url', async () => {
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=challenge-no-fallback';
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null, challengeUrl }));
+
+    const deps = createDeps({ buildCheckout });
+    const res = await attemptCheckoutBuild({ discordUserId: 'u1', itemId: 404n }, deps);
+
+    expect(buildCheckout).toHaveBeenCalledTimes(1);
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({
+      status: 'blocked',
+      source: 'missing_checkout_url',
+      purchaseIdCandidates: [404n],
+      challengeUrl,
+    });
+  });
+
   it('returns access_denied when Vinted denies checkout API access', async () => {
     const buildCheckout = vi.fn().mockResolvedValueOnce(
       err({
@@ -250,6 +270,44 @@ describe('attemptCheckoutBuild', () => {
     expect(new Set((res.value.purchaseIdCandidates ?? []).map((candidate) => candidate.toString()))).toEqual(
       new Set(['777', '123']),
     );
+  });
+
+  it('does not retry with original item id when transaction checkout is blocked with challenge url', async () => {
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=challenge-stop-retry';
+    const createConversationTransaction = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ transactionId: 777n }));
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null, challengeUrl }));
+
+    const deps = createDeps({
+      createConversationTransaction,
+      buildCheckout,
+      getAccountForUser: () =>
+        Promise.resolve(
+          ok({
+            region: 'de',
+            encryptedRefreshToken: 'encrypted',
+            pickupPoint: null,
+          }),
+        ),
+    });
+    const res = await attemptCheckoutBuild(
+      { discordUserId: 'u1', itemId: 123n, sellerUserId: 456 },
+      deps,
+    );
+
+    expect(buildCheckout).toHaveBeenCalledTimes(1);
+    expect(buildCheckout.mock.calls[0]?.[0].itemId).toBe(777n);
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({
+      status: 'blocked',
+      source: 'missing_checkout_url',
+      purchaseIdCandidates: [777n],
+      challengeUrl,
+    });
   });
 });
 
@@ -400,6 +458,34 @@ describe('attemptInstantBuy', () => {
     expect(res.isOk()).toBe(true);
     if (res.isErr()) return;
     expect(res.value).toEqual({ status: 'manual_checkout_required' });
+  });
+
+  it('does not run submit fallback when checkout build is blocked by challenge url', async () => {
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=challenge-stop-submit-fallback';
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null, challengeUrl }));
+    const submitCheckoutPurchase = vi.fn().mockResolvedValue(ok({ purchased: true }));
+
+    const deps = createInstantBuyDeps({
+      buildCheckout,
+      submitCheckoutPurchase,
+      getAccountForUser: () =>
+        Promise.resolve(
+          ok({
+            region: 'de',
+            encryptedRefreshToken: 'encrypted',
+            pickupPoint: null,
+          }),
+        ),
+    });
+
+    const res = await attemptInstantBuy({ discordUserId: 'u1', itemId: 15n }, deps);
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({ status: 'blocked', challengeUrl });
+    expect(submitCheckoutPurchase).not.toHaveBeenCalled();
   });
 });
 

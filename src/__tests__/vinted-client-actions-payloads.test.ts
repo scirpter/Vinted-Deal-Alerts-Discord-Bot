@@ -472,7 +472,8 @@ describe('VintedClient action request compatibility', () => {
   it('returns challenge url when checkout remains blocked by captcha delivery', async () => {
     process.env.VINTED_HTTP_BACKEND = 'fetch';
     const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=test-persist';
-    vi.spyOn(globalThis, 'fetch')
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
       .mockResolvedValueOnce(
         new Response('<html>challenge</html>', {
@@ -480,8 +481,6 @@ describe('VintedClient action request compatibility', () => {
           headers: { 'content-type': 'text/html' },
         }),
       )
-      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
-      .mockResolvedValueOnce(jsonResponse(200, { items: [] }))
       .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }));
 
     const res = await new VintedClient().buildCheckout({
@@ -497,6 +496,13 @@ describe('VintedClient action request compatibility', () => {
     if (res.isErr()) return;
     expect(res.value.checkoutUrl).toBeNull();
     expect(res.value.challengeUrl).toContain('captcha-delivery.com/captcha/');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fetchMock.mock.calls.some(
+        (call) =>
+          call[0] === 'https://www.vinted.nl/api/v2/catalog/items?page=1&per_page=1&order=newest_first',
+      ),
+    ).toBe(false);
   });
 
   it('runs checkout preflight and retries when checkout build stays blocked', async () => {

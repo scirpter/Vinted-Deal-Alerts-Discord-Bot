@@ -111,7 +111,7 @@ export async function handleListingActionButton(interaction: ButtonInteraction) 
 
     if (res.value.status === 'manual_checkout_required') {
       const challengeHint = res.value.challengeUrl
-        ? `\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".`
+        ? `\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".\nFalls dort "Deine Sitzung wurde blockiert" steht, ist die aktuelle IP bei DataDome gesperrt. Deaktiviere VPN/Proxy, wechsle das Netzwerk (z. B. Mobilfunk) und versuche es später erneut.`
         : '';
       await interaction.editReply(
         `Direktkauf konnte nicht finalisiert werden. Vinted verlangt für diesen Kauf weiterhin den manuellen Abschluss in App/Web.${challengeHint}`,
@@ -122,7 +122,7 @@ export async function handleListingActionButton(interaction: ButtonInteraction) 
     if (res.value.status === 'blocked') {
       if (res.value.challengeUrl) {
         await interaction.editReply(
-          `Checkout wird durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".`,
+          `Checkout wird durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".\nFalls dort "Deine Sitzung wurde blockiert" steht, ist die aktuelle IP bei DataDome gesperrt. Deaktiviere VPN/Proxy, wechsle das Netzwerk (z. B. Mobilfunk) und versuche es später erneut.`,
         );
         return;
       }

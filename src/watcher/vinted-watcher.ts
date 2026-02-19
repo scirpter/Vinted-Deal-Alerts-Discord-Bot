@@ -418,7 +418,7 @@ async function processSubscription(
 
       if (buy.value.status === 'manual_checkout_required') {
         const challengeHint = buy.value.challengeUrl
-          ? `\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.`
+          ? `\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.\nFalls dort "Deine Sitzung wurde blockiert" steht, ist die aktuelle IP bei DataDome gesperrt. Deaktiviere VPN/Proxy, wechsle das Netzwerk (z. B. Mobilfunk) und versuche es später erneut.`
           : '';
         try {
           await channel.send(
@@ -440,7 +440,7 @@ async function processSubscription(
       if (buy.value.status === 'blocked') {
         if (buy.value.challengeUrl) {
           message =
-            `Autokauf: durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.`;
+            `Autokauf: durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.\nFalls dort "Deine Sitzung wurde blockiert" steht, ist die aktuelle IP bei DataDome gesperrt. Deaktiviere VPN/Proxy, wechsle das Netzwerk (z. B. Mobilfunk) und versuche es später erneut.`;
         } else {
           message =
             'Autokauf: durch Vinted-Schutzmaßnahmen blockiert. Bitte schließe den Kauf manuell in Vinted ab.';

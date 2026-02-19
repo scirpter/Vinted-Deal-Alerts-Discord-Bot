@@ -110,6 +110,7 @@ function parseStatusCode(value: unknown): number | null {
 }
 
 function shouldRetryWithAuthorization(message: string): boolean {
+  if (extractCaptchaDeliveryUrl(message)) return false;
   const lower = message.toLowerCase();
   return lower.includes('(401)') || lower.includes('(403)') || lower.includes('access_denied');
 }
@@ -1208,6 +1209,9 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
       });
       return fetchJson({ ...normalizedInput, captchaRetryCount: captchaRetryCount + 1 });
     }
+    if (challengeUrl) {
+      return err(toVintedCaptchaChallengeError(challengeUrl));
+    }
 
     if (backend === 'auto' && (res.status === 401 || res.status === 403)) {
       logger.warn(
@@ -1244,9 +1248,6 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
     }
     if (looksLikeBotBlock(res.status, res.headers.get('content-type'), text)) {
       return err(toVintedBlockedError());
-    }
-    if (challengeUrl) {
-      return err(toVintedCaptchaChallengeError(challengeUrl));
     }
     return err(
       toVintedError(
@@ -1665,6 +1666,7 @@ function isCheckoutPurchaseCompleted(payload: unknown): boolean {
 }
 
 function shouldPrimeCheckoutSessionFromError(message: string): boolean {
+  if (extractCaptchaDeliveryUrl(message)) return false;
   const lower = message.toLowerCase();
   return (
     lower.includes('(403)') ||

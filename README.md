@@ -20,6 +20,7 @@ Vinted nutzt Anti-Bot- und Zugriffsschutz. Einige zustandsändernde Aktionen (in
 - Erkennt und unterscheidet `blocked` (Cloudflare/CAPTCHA) und `access_denied` (API-Zugriff verweigert)
 - Versucht bei `401/403` im `auto`-Backend zusätzlich einen zweiten Request über `curl`, bevor endgültig fehlgeschlagen wird
 - Erkennt DataDome-Captcha-Challenges (`captcha-delivery.com`) und versucht einmalig ein Session-Priming mit anschließendem Retry
+- Bricht bei fortbestehender DataDome-Challenge früh ab (kein zusätzlicher Authorization-/Submit-Fallback), um unnötige 403-Serien zu vermeiden
 - Gibt bei DataDome-Blocks den konkreten Challenge-Link zurück, damit du ihn im Browser öffnen und danach den Kauf erneut auslösen kannst
 - Gibt klare, konkrete Hinweise zur Behebung (`/setup account`, Region prüfen, manuell in Vinted abschließen)
 - Erkennt auch API-`errors`-Payloads (bei HTTP 200) als echte Fehler statt stillem Fallback
@@ -32,7 +33,7 @@ Vinted nutzt Anti-Bot- und Zugriffsschutz. Einige zustandsändernde Aktionen (in
 - Nutzt bei Checkout einen Fallback ohne `pickup_point`, falls die gespeicherten Koordinaten ungültig sind
 - Versucht bei Checkout zuerst die aufgelöste Transaktions-ID und fällt bei fehlender Checkout-URL automatisch auf die ursprüngliche Item-ID zurück
 - Erkennt zusätzliche Checkout-Response-Formate (verschachtelte `purchase_id`/`next_step.url`) statt fälschlich als blockiert zu enden
-- Versucht bei fehlender `checkout_url` zusätzlich einen direkten Submit-Fallback mit den ermittelten Kauf-ID-Kandidaten (`transactionId`/`itemId`)
+- Versucht bei fehlender `checkout_url` zusätzlich einen direkten Submit-Fallback mit den ermittelten Kauf-ID-Kandidaten (`transactionId`/`itemId`) - jedoch nicht bei aktiver DataDome-Challenge
 - Loggt beim Submit-Fallback jeden Kauf-ID-Kandidaten inkl. Ergebnis, um Checkout-Blocks präzise zu diagnostizieren
 - Erkennt `invalid_grant` beim Token-Refresh als dauerhaft und pausiert weitere Refresh-Versuche zeitweise, bis `/setup account` erneut ausgeführt wurde
 - Benachrichtigt bei `invalid_grant` zusätzlich direkt im Abo-Kanal (mit Mention) und per DM als Best-Effort mit Cooldown
