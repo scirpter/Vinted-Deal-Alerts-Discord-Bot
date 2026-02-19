@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+.pnpm-debug.log
+AGENTS.md
