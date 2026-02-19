@@ -201,6 +201,7 @@ describe('VintedClient action request compatibility', () => {
     const headers = (request.headers ?? {}) as Record<string, string>;
     expect(headers['x-incognia-request-token']).toBe('icg-token');
     expect(headers['x-anon-id']).toBe('anon-123');
+    expect(headers['x-datadome-clientid']).toBe('abc');
     expect(headers['x-csrf-token']).toBe('75f6c9fa-dc8e-4e52-a000-e09dd4084b3e');
     expect(headers.cookie).toContain('datadome=abc');
     expect(headers['x-custom-test']).toBe('yes');
@@ -426,6 +427,76 @@ describe('VintedClient action request compatibility', () => {
     const secondHeaders = (fetchMock.mock.calls[1]?.[1] as RequestInit).headers as Record<string, string>;
     expect(firstHeaders.authorization).toBeUndefined();
     expect(secondHeaders.authorization).toBe('Bearer access-token');
+  });
+
+  it('primes captcha challenge session and retries checkout build once', async () => {
+    process.env.VINTED_HTTP_BACKEND = 'fetch';
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=test123';
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
+      .mockResolvedValueOnce(
+        new Response('<html>challenge</html>', {
+          status: 200,
+          headers: {
+            'content-type': 'text/html',
+            'set-cookie': 'datadome=dd-cookie; Domain=.vinted.nl; Path=/',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { checkout: { id: 77 } }));
+
+    const res = await new VintedClient().buildCheckout({
+      region: 'nl',
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      itemId: 77n,
+      pickupPoint: null,
+      sessionKey: 'user-77',
+    });
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value.checkoutUrl).toBe(
+      'https://www.vinted.nl/checkout?purchase_id=77&order_id=77&order_type=transaction',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(challengeUrl);
+
+    const retryRequest = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    const retryHeaders = (retryRequest.headers ?? {}) as Record<string, string>;
+    expect(retryHeaders.cookie).toContain('datadome=dd-cookie');
+    expect(retryHeaders['x-datadome-clientid']).toBe('dd-cookie');
+  });
+
+  it('returns challenge url when checkout remains blocked by captcha delivery', async () => {
+    process.env.VINTED_HTTP_BACKEND = 'fetch';
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=test-persist';
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
+      .mockResolvedValueOnce(
+        new Response('<html>challenge</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: [] }))
+      .mockResolvedValueOnce(jsonResponse(403, { url: challengeUrl }));
+
+    const res = await new VintedClient().buildCheckout({
+      region: 'nl',
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      itemId: 88n,
+      pickupPoint: null,
+      sessionKey: 'user-88',
+    });
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value.checkoutUrl).toBeNull();
+    expect(res.value.challengeUrl).toContain('captcha-delivery.com/captcha/');
   });
 
   it('runs checkout preflight and retries when checkout build stays blocked', async () => {

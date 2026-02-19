@@ -261,15 +261,45 @@ function mergeCookieHeaders(values: Array<string | undefined>): string | undefin
   return serializeCookieHeader(merged);
 }
 
-function parseCookiePairFromSetCookie(setCookieHeader: string): [string, string] | null {
-  const pairPart = setCookieHeader.split(';', 1)[0]?.trim();
-  if (!pairPart) return null;
-  const eqIndex = pairPart.indexOf('=');
+type ParsedSetCookie = {
+  name: string;
+  value: string;
+  domain: string | null;
+};
+
+function normalizeCookieDomain(value: string): string | null {
+  const trimmed = value.trim().replace(/^\.+/, '').toLowerCase();
+  if (!trimmed) return null;
+  return trimmed;
+}
+
+function parseSetCookie(setCookieHeader: string): ParsedSetCookie | null {
+  const parts = setCookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const firstPart = parts[0];
+  if (!firstPart) return null;
+
+  const eqIndex = firstPart.indexOf('=');
   if (eqIndex <= 0) return null;
-  const name = pairPart.slice(0, eqIndex).trim();
-  const value = pairPart.slice(eqIndex + 1).trim();
+
+  const name = firstPart.slice(0, eqIndex).trim();
+  const value = firstPart.slice(eqIndex + 1).trim();
   if (!name) return null;
-  return [name, value];
+
+  let domain: string | null = null;
+  for (const part of parts.slice(1)) {
+    const attrEq = part.indexOf('=');
+    if (attrEq <= 0) continue;
+    const attrName = part.slice(0, attrEq).trim().toLowerCase();
+    if (attrName !== 'domain') continue;
+    const attrValue = part.slice(attrEq + 1).trim();
+    domain = normalizeCookieDomain(attrValue);
+    break;
+  }
+
+  return { name, value, domain };
 }
 
 function resolveHostFromUrl(url: string): string | null {
@@ -334,26 +364,41 @@ function getCookieHeaderFromJar(url: string, sessionScope?: string): string | un
   const host = resolveHostFromUrl(url);
   if (!host) return undefined;
   const scopeKey = normalizeSessionScope(sessionScope);
-  const cookies = getCookiesForScopeHost({ sessionScope: scopeKey, host, create: false });
-  if (!cookies || cookies.size === 0) return undefined;
-  return serializeCookieHeader(cookies);
+  const scopeMap = cookieJarByScopeHost.get(scopeKey);
+  if (!scopeMap || scopeMap.size === 0) return undefined;
+
+  const matchingHosts = Array.from(scopeMap.keys())
+    .filter((storedHost) => host === storedHost || host.endsWith(`.${storedHost}`))
+    .sort((a, b) => a.length - b.length);
+  if (matchingHosts.length === 0) return undefined;
+
+  const merged = new Map<string, string>();
+  for (const storedHost of matchingHosts) {
+    const cookies = scopeMap.get(storedHost);
+    if (!cookies) continue;
+    for (const [name, value] of cookies.entries()) {
+      merged.set(name, value);
+    }
+  }
+  if (merged.size === 0) return undefined;
+  return serializeCookieHeader(merged);
 }
 
 function setCookiesInJar(url: string, setCookieHeaders: string[], sessionScope?: string): void {
   const host = resolveHostFromUrl(url);
   if (!host || setCookieHeaders.length === 0) return;
   const scopeKey = normalizeSessionScope(sessionScope);
-  const cookies = getCookiesForScopeHost({ sessionScope: scopeKey, host, create: true });
-  if (!cookies) return;
 
   for (const headerValue of setCookieHeaders) {
-    const parsed = parseCookiePairFromSetCookie(headerValue);
+    const parsed = parseSetCookie(headerValue);
     if (!parsed) continue;
-    const [name, value] = parsed;
-    if (value.length === 0) {
-      cookies.delete(name);
+    const cookieHost = parsed.domain ?? host;
+    const cookies = getCookiesForScopeHost({ sessionScope: scopeKey, host: cookieHost, create: true });
+    if (!cookies) continue;
+    if (parsed.value.length === 0) {
+      cookies.delete(parsed.name);
     } else {
-      cookies.set(name, value);
+      cookies.set(parsed.name, parsed.value);
     }
   }
 }
@@ -692,6 +737,7 @@ type FetchJsonInput = {
   body?: unknown;
   sessionScope?: string | undefined;
   requestProfile?: 'default' | 'oauth_token';
+  captchaRetryCount?: number;
 };
 
 type VintedHttpBackend = 'auto' | 'fetch' | 'curl';
@@ -817,6 +863,15 @@ function buildRequestHeaders(input: {
       setHeaderCaseInsensitive(resolved, 'x-v-udt', vUdt);
     }
 
+    const dataDomeClientId =
+      readHeaderCaseInsensitive(headers, 'x-datadome-clientid') ??
+      readHeaderCaseInsensitive(sessionHeaders, 'x-datadome-clientid') ??
+      readHeaderCaseInsensitive(envHeaders, 'x-datadome-clientid') ??
+      mergedCookiesMap.get('datadome');
+    if (dataDomeClientId) {
+      setHeaderCaseInsensitive(resolved, 'x-datadome-clientid', dataDomeClientId);
+    }
+
     const csrfToken =
       readHeaderCaseInsensitive(headers, 'x-csrf-token') ??
       readHeaderCaseInsensitive(sessionHeaders, 'x-csrf-token') ??
@@ -890,6 +945,79 @@ function toVintedBlockedError(): VintedError {
   return toVintedError(
     'Vinted hat die Anfrage blockiert (Anti-Bot/Cloudflare). Bitte warte kurz und versuche es später erneut.',
   );
+}
+
+function extractCaptchaDeliveryUrl(text: string): string | null {
+  const normalized = text.replace(/\\\//g, '/');
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      const urlCandidate = (parsed as { url?: unknown }).url;
+      if (typeof urlCandidate === 'string' && urlCandidate.toLowerCase().includes('captcha-delivery.com/captcha/')) {
+        return urlCandidate.trim();
+      }
+    }
+  } catch {
+    // keep regex fallback
+  }
+
+  const match = normalized.match(/https?:\/\/[^\s"'<>]*captcha-delivery\.com\/captcha\/[^\s"'<>]*/i);
+  return match?.[0]?.trim() ?? null;
+}
+
+function toVintedCaptchaChallengeError(challengeUrl: string): VintedError {
+  return toVintedError(
+    `Vinted request blocked by DataDome challenge. Open this URL in your browser and retry: ${challengeUrl}`,
+  );
+}
+
+async function primeSessionViaCaptchaDelivery(input: {
+  requestUrl: string;
+  challengeUrl: string;
+  sessionScope?: string | undefined;
+  requestProfile?: 'default' | 'oauth_token';
+}): Promise<void> {
+  if (input.requestProfile === 'oauth_token') return;
+
+  const normalizedScope = normalizeSessionScope(input.sessionScope);
+  const headers = buildRequestHeaders({
+    url: input.challengeUrl,
+    headers: {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      referer: input.requestUrl,
+    },
+    includeUserAgent: true,
+    sessionScope: normalizedScope,
+  });
+
+  const response = await fetch(input.challengeUrl, {
+    method: 'GET',
+    headers,
+    redirect: 'follow',
+  }).catch((error: unknown) => {
+    logger.debug({ err: error, challengeUrl: input.challengeUrl }, 'Failed to open captcha delivery URL');
+    return null;
+  });
+  if (!response) return;
+
+  const challengeSetCookies = getSetCookieHeaders(response.headers);
+  if (challengeSetCookies.length > 0) {
+    setCookiesInJar(input.challengeUrl, challengeSetCookies, normalizedScope);
+    setCookiesInJar(input.requestUrl, challengeSetCookies, normalizedScope);
+  }
+  rememberResponseHeadersForSession({
+    url: input.challengeUrl,
+    headers: response.headers,
+    sessionScope: normalizedScope,
+  });
+  rememberResponseHeadersForSession({
+    url: input.requestUrl,
+    headers: response.headers,
+    sessionScope: normalizedScope,
+  });
+
+  await response.arrayBuffer().catch(() => undefined);
 }
 
 function isInvalidGrantError(message: string): boolean {
@@ -980,6 +1108,10 @@ async function fetchJsonViaCurl(input: FetchJsonInput): Promise<Result<unknown, 
   if (!Number.isFinite(status)) return err(toVintedError('Curl returned invalid status code.'));
 
   if (status < 200 || status >= 300) {
+    const challengeUrl = extractCaptchaDeliveryUrl(text);
+    if (challengeUrl) {
+      return err(toVintedCaptchaChallengeError(challengeUrl));
+    }
     if (looksLikeBotBlock(status, null, text)) return err(toVintedBlockedError());
     return err(
       toVintedError(
@@ -1003,6 +1135,7 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
     body,
     sessionScope,
     requestProfile = 'default',
+    captchaRetryCount = 0,
   } = input;
   const headersWithIncognia = await withAutoIncogniaRequestHeader({
     url,
@@ -1055,6 +1188,27 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
 
   const text = await res.text();
   if (!res.ok) {
+    const challengeUrl = extractCaptchaDeliveryUrl(text);
+    if (challengeUrl && captchaRetryCount < 1) {
+      logger.warn(
+        {
+          status: res.status,
+          method,
+          url,
+          challengeUrl,
+          sessionScope: sessionScope ?? null,
+        },
+        'Vinted returned captcha challenge; priming session and retrying once',
+      );
+      await primeSessionViaCaptchaDelivery({
+        requestUrl: url,
+        challengeUrl,
+        sessionScope,
+        requestProfile,
+      });
+      return fetchJson({ ...normalizedInput, captchaRetryCount: captchaRetryCount + 1 });
+    }
+
     if (backend === 'auto' && (res.status === 401 || res.status === 403)) {
       logger.warn(
         {
@@ -1064,10 +1218,12 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
           hasCookieHeader: Boolean(requestCookieHeader),
           hasAnonCookie: requestCookies.has('anon_id'),
           hasVudtCookie: requestCookies.has('v_udt'),
+          hasDatadomeCookie: requestCookies.has('datadome'),
           hasAccessTokenCookie: requestCookies.has('access_token_web'),
           hasRefreshTokenCookie: requestCookies.has('refresh_token_web'),
           hasAnonHeader: Boolean(readHeaderCaseInsensitive(requestHeaders, 'x-anon-id')),
           hasVudtHeader: Boolean(readHeaderCaseInsensitive(requestHeaders, 'x-v-udt')),
+          hasDatadomeHeader: Boolean(readHeaderCaseInsensitive(requestHeaders, 'x-datadome-clientid')),
           hasCsrfHeader: Boolean(readHeaderCaseInsensitive(requestHeaders, 'x-csrf-token')),
           hasIncogniaHeader: Boolean(readHeaderCaseInsensitive(requestHeaders, 'x-incognia-request-token')),
         },
@@ -1088,6 +1244,9 @@ async function fetchJson(input: FetchJsonInput): Promise<Result<unknown, VintedE
     }
     if (looksLikeBotBlock(res.status, res.headers.get('content-type'), text)) {
       return err(toVintedBlockedError());
+    }
+    if (challengeUrl) {
+      return err(toVintedCaptchaChallengeError(challengeUrl));
     }
     return err(
       toVintedError(
@@ -1846,7 +2005,7 @@ export class VintedClient {
     itemId: bigint;
     pickupPoint?: string | null;
     sessionKey?: string;
-  }): Promise<Result<{ checkoutUrl: string | null }, VintedError>> {
+  }): Promise<Result<{ checkoutUrl: string | null; challengeUrl?: string | null }, VintedError>> {
     const baseUrl = baseUrlForRegion(input.region);
     await warmupHostSession({ baseUrl, sessionScope: input.sessionKey });
     const url = `${baseUrl}/api/v2/purchases/checkout/build`;
@@ -1885,6 +2044,10 @@ export class VintedClient {
     }
 
     if (json.isErr()) {
+      const challengeUrl = extractCaptchaDeliveryUrl(json.error.message);
+      if (challengeUrl) {
+        return ok({ checkoutUrl: null, challengeUrl });
+      }
       if (json.error.message.includes('captcha-delivery.com')) {
         return ok({ checkoutUrl: null });
       }

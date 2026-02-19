@@ -5,7 +5,14 @@ import prettier from 'eslint-config-prettier';
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'drizzle/migrations/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'drizzle/migrations/**',
+      '.tmp_vinted_chunks/**',
+      '.tmp_vinted_*.html',
+      '.tmp_vinted_module_*.js',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked.map((config) => ({

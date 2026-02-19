@@ -8,7 +8,10 @@ import { getAccessTokenForUser } from './vinted-token-service.js';
 
 const vinted = new VintedClient();
 
-type CheckoutBuildResponse = Result<{ checkoutUrl: string | null }, { message: string }>;
+type CheckoutBuildResponse = Result<
+  { checkoutUrl: string | null; challengeUrl?: string | null },
+  { message: string }
+>;
 
 type CheckoutBuildDependencies = {
   getAccessTokenForUser: typeof getAccessTokenForUser;
@@ -95,7 +98,13 @@ const defaultOfferDependencies: OfferDependencies = {
 export type CheckoutBuildResult =
   | { status: 'ready'; checkoutUrl: string }
   | { status: 'ready_without_pickup'; checkoutUrl: string }
-  | { status: 'blocked' | 'access_denied' | 'invalid_pickup_point' | 'failed' };
+  | {
+      status: 'blocked';
+      source?: string;
+      purchaseIdCandidates?: bigint[];
+      challengeUrl?: string;
+    }
+  | { status: 'access_denied' | 'invalid_pickup_point' | 'failed' };
 
 export type InstantBuyResult = {
   status:
@@ -106,6 +115,7 @@ export type InstantBuyResult = {
     | 'access_denied'
     | 'invalid_pickup_point'
     | 'failed';
+  challengeUrl?: string;
 };
 
 export type OfferAttemptResult =
@@ -130,6 +140,43 @@ function logCheckoutStatus(input: { discordUserId: string; itemId: bigint }, sta
     { discordUserId: input.discordUserId, itemId: input.itemId.toString(), status, ...extra },
     'Checkout status evaluated',
   );
+}
+
+function normalizePurchaseIdCandidates(candidates: bigint[]): bigint[] {
+  const seen = new Set<string>();
+  const normalized: bigint[] = [];
+  for (const candidate of candidates) {
+    if (candidate <= 0n) continue;
+    const key = candidate.toString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(candidate);
+  }
+  return normalized;
+}
+
+function getPurchaseIdCandidatesFromCheckoutResult(result: CheckoutBuildResult): bigint[] {
+  if (result.status !== 'blocked') return [];
+  return normalizePurchaseIdCandidates(result.purchaseIdCandidates ?? []);
+}
+
+function withMergedPurchaseIdCandidates(
+  base: CheckoutBuildResult,
+  extraCandidates: bigint[],
+): CheckoutBuildResult {
+  if (base.status !== 'blocked') return base;
+  const merged = normalizePurchaseIdCandidates([
+    ...getPurchaseIdCandidatesFromCheckoutResult(base),
+    ...extraCandidates,
+  ]);
+  if (merged.length === 0) return base;
+  return { ...base, purchaseIdCandidates: merged };
+}
+
+function extractCaptchaChallengeUrl(message: string): string | null {
+  const normalized = message.replace(/\\\//g, '/');
+  const match = normalized.match(/https?:\/\/[^\s"'<>]*captcha-delivery\.com\/captcha\/[^\s"'<>]*/i);
+  return match?.[0]?.trim() ?? null;
 }
 
 function parseBigintCandidate(value: unknown): bigint | null {
@@ -288,17 +335,29 @@ export async function attemptCheckoutBuild(
           logCheckoutStatus(input, 'ready_without_pickup', { checkoutItemId: checkoutItemIdValue });
           return { status: 'ready_without_pickup', checkoutUrl: fallbackAttempt.value.checkoutUrl };
         }
+        const challengeUrl = fallbackAttempt.value.challengeUrl?.trim() || undefined;
         logCheckoutStatus(input, 'blocked', {
           source: 'fallback_missing_checkout_url',
           checkoutItemId: checkoutItemIdValue,
+          ...(challengeUrl ? { challengeUrl } : {}),
         });
-        return { status: 'blocked' };
+        return {
+          status: 'blocked',
+          source: 'fallback_missing_checkout_url',
+          purchaseIdCandidates: [checkoutItemId],
+          ...(challengeUrl ? { challengeUrl } : {}),
+        };
       }
 
       const fallbackFailure = classifyCheckoutErrorMessage(fallbackAttempt.error.message);
       if (fallbackFailure === 'blocked') {
-        logCheckoutStatus(input, 'blocked', { source: 'fallback_error', checkoutItemId: checkoutItemIdValue });
-        return { status: 'blocked' };
+        const challengeUrl = extractCaptchaChallengeUrl(fallbackAttempt.error.message) ?? undefined;
+        logCheckoutStatus(input, 'blocked', {
+          source: 'fallback_error',
+          checkoutItemId: checkoutItemIdValue,
+          ...(challengeUrl ? { challengeUrl } : {}),
+        });
+        return { status: 'blocked', ...(challengeUrl ? { challengeUrl } : {}) };
       }
       if (fallbackFailure === 'access_denied') {
         logCheckoutStatus(input, 'access_denied', {
@@ -328,11 +387,25 @@ export async function attemptCheckoutBuild(
       if (firstAttempt.value.checkoutUrl) {
         return { status: 'ready', checkoutUrl: firstAttempt.value.checkoutUrl };
       }
+      const challengeUrl = firstAttempt.value.challengeUrl?.trim() || undefined;
       if (hasPickupPoint) {
-        return attemptFallbackWithoutPickup('missing_checkout_url');
+        const fallbackResult = await attemptFallbackWithoutPickup('missing_checkout_url');
+        if (fallbackResult.status === 'blocked' && !fallbackResult.challengeUrl && challengeUrl) {
+          return { ...fallbackResult, challengeUrl };
+        }
+        return fallbackResult;
       }
-      logCheckoutStatus(input, 'blocked', { source: 'missing_checkout_url', checkoutItemId: checkoutItemIdValue });
-      return { status: 'blocked' };
+      logCheckoutStatus(input, 'blocked', {
+        source: 'missing_checkout_url',
+        checkoutItemId: checkoutItemIdValue,
+        ...(challengeUrl ? { challengeUrl } : {}),
+      });
+      return {
+        status: 'blocked',
+        source: 'missing_checkout_url',
+        purchaseIdCandidates: [checkoutItemId],
+        ...(challengeUrl ? { challengeUrl } : {}),
+      };
     }
 
     const firstFailure = classifyCheckoutErrorMessage(firstAttempt.error.message);
@@ -341,8 +414,13 @@ export async function attemptCheckoutBuild(
     }
 
     const finalStatus = statusFromFailure(firstFailure);
+    const challengeUrl = extractCaptchaChallengeUrl(firstAttempt.error.message) ?? undefined;
+    const statusWithChallenge =
+      finalStatus.status === 'blocked' && challengeUrl
+        ? { ...finalStatus, challengeUrl }
+        : finalStatus;
     logCheckoutStatus(input, finalStatus.status, { checkoutItemId: checkoutItemIdValue });
-    return finalStatus;
+    return statusWithChallenge;
   };
 
   const firstResult = await attemptBuildForItemId(transactionId);
@@ -371,7 +449,137 @@ export async function attemptCheckoutBuild(
   );
 
   const secondResult = await attemptBuildForItemId(input.itemId);
-  return ok(secondResult);
+  const mergedCandidates = normalizePurchaseIdCandidates([
+    ...getPurchaseIdCandidatesFromCheckoutResult(firstResult),
+    ...getPurchaseIdCandidatesFromCheckoutResult(secondResult),
+  ]);
+  const mergedResult = withMergedPurchaseIdCandidates(secondResult, mergedCandidates);
+  if (
+    mergedResult.status === 'blocked' &&
+    !mergedResult.challengeUrl &&
+    firstResult.status === 'blocked' &&
+    firstResult.challengeUrl
+  ) {
+    return ok({ ...mergedResult, challengeUrl: firstResult.challengeUrl });
+  }
+  return ok(mergedResult);
+}
+
+function shouldAttemptOptimisticSubmit(result: CheckoutBuildResult): boolean {
+  if (result.status !== 'blocked') return false;
+  const source = result.source?.toLowerCase().trim() ?? '';
+  if (source !== 'missing_checkout_url' && source !== 'fallback_missing_checkout_url') {
+    return false;
+  }
+  return getPurchaseIdCandidatesFromCheckoutResult(result).length > 0;
+}
+
+async function attemptSubmitWithoutCheckoutUrl(input: {
+  discordUserId: string;
+  itemId: bigint;
+  region: VintedRegion;
+  accessToken: string;
+  refreshToken?: string;
+  purchaseIdCandidates: bigint[];
+  submitCheckoutPurchase: CheckoutSubmitDependencies['submitCheckoutPurchase'];
+}): Promise<InstantBuyResult | null> {
+  const purchaseIdCandidates = normalizePurchaseIdCandidates(input.purchaseIdCandidates);
+  if (purchaseIdCandidates.length === 0) return null;
+
+  logger.info(
+    {
+      discordUserId: input.discordUserId,
+      itemId: input.itemId.toString(),
+      purchaseIdCandidates: purchaseIdCandidates.map((candidate) => candidate.toString()),
+    },
+    'Trying checkout submit fallback without checkout url',
+  );
+
+  let hasManualCheckoutHint = false;
+  let hasBlockedFailure = false;
+  let hasAccessDeniedFailure = false;
+  let hasFailedFallback = false;
+  let challengeUrl: string | null = null;
+
+  for (const purchaseId of purchaseIdCandidates) {
+    logger.info(
+      {
+        discordUserId: input.discordUserId,
+        itemId: input.itemId.toString(),
+        purchaseId: purchaseId.toString(),
+      },
+      'Trying checkout submit fallback candidate',
+    );
+
+    const submitAttempt = await input.submitCheckoutPurchase({
+      region: input.region,
+      accessToken: input.accessToken,
+      purchaseId,
+      sessionKey: input.discordUserId,
+      ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
+    });
+
+    if (submitAttempt.isOk()) {
+      if (submitAttempt.value.purchased) {
+        logger.info(
+          {
+            discordUserId: input.discordUserId,
+            itemId: input.itemId.toString(),
+            purchaseId: purchaseId.toString(),
+          },
+          'Checkout submit fallback candidate purchased successfully',
+        );
+        return { status: 'purchased' };
+      }
+      logger.info(
+        {
+          discordUserId: input.discordUserId,
+          itemId: input.itemId.toString(),
+          purchaseId: purchaseId.toString(),
+        },
+        'Checkout submit fallback candidate requires manual completion',
+      );
+      hasManualCheckoutHint = true;
+      continue;
+    }
+
+    const submitFailure = classifyCheckoutErrorMessage(submitAttempt.error.message);
+    const submitChallengeUrl = extractCaptchaChallengeUrl(submitAttempt.error.message);
+    if (!challengeUrl && submitChallengeUrl) {
+      challengeUrl = submitChallengeUrl;
+    }
+    logger.warn(
+      {
+        discordUserId: input.discordUserId,
+        itemId: input.itemId.toString(),
+        purchaseId: purchaseId.toString(),
+        submitFailure,
+        ...(submitChallengeUrl ? { challengeUrl: submitChallengeUrl } : {}),
+        error: submitAttempt.error.message.slice(0, 240),
+      },
+      'Checkout submit fallback candidate failed',
+    );
+    if (submitFailure === 'blocked') {
+      hasBlockedFailure = true;
+      continue;
+    }
+    if (submitFailure === 'access_denied') {
+      hasAccessDeniedFailure = true;
+      continue;
+    }
+    hasFailedFallback = true;
+  }
+
+  if (hasManualCheckoutHint) {
+    return { status: 'manual_checkout_required', ...(challengeUrl ? { challengeUrl } : {}) };
+  }
+  if (hasAccessDeniedFailure) return { status: 'access_denied' };
+  if (hasBlockedFailure) return { status: 'blocked', ...(challengeUrl ? { challengeUrl } : {}) };
+  if (hasFailedFallback) {
+    return { status: 'manual_checkout_required', ...(challengeUrl ? { challengeUrl } : {}) };
+  }
+
+  return null;
 }
 
 export async function attemptMakeOffer(
@@ -446,6 +654,42 @@ export async function attemptInstantBuy(
     checkoutAttempt.value.status !== 'ready' &&
     checkoutAttempt.value.status !== 'ready_without_pickup'
   ) {
+    if (shouldAttemptOptimisticSubmit(checkoutAttempt.value)) {
+      const token = await deps.getAccessTokenForUser({ discordUserId: input.discordUserId });
+      if (token.isErr()) return err(token.error);
+
+      const submitWithoutCheckoutUrlResult = await attemptSubmitWithoutCheckoutUrl({
+        discordUserId: input.discordUserId,
+        itemId: input.itemId,
+        region: token.value.region,
+        accessToken: token.value.accessToken,
+        refreshToken: token.value.refreshToken,
+        purchaseIdCandidates: getPurchaseIdCandidatesFromCheckoutResult(checkoutAttempt.value),
+        submitCheckoutPurchase: deps.submitCheckoutPurchase,
+      });
+
+      if (submitWithoutCheckoutUrlResult) {
+        logger.info(
+          {
+            discordUserId: input.discordUserId,
+            itemId: input.itemId.toString(),
+            status: submitWithoutCheckoutUrlResult.status,
+            ...(submitWithoutCheckoutUrlResult.challengeUrl
+              ? { challengeUrl: submitWithoutCheckoutUrlResult.challengeUrl }
+              : {}),
+          },
+          'Checkout submit fallback finished',
+        );
+        return ok(submitWithoutCheckoutUrlResult);
+      }
+    }
+
+    if (checkoutAttempt.value.status === 'blocked') {
+      return ok({
+        status: checkoutAttempt.value.status,
+        ...(checkoutAttempt.value.challengeUrl ? { challengeUrl: checkoutAttempt.value.challengeUrl } : {}),
+      });
+    }
     return ok({ status: checkoutAttempt.value.status });
   }
 
@@ -476,8 +720,9 @@ export async function attemptInstantBuy(
 
   if (submitAttempt.isErr()) {
     const submitFailure = classifyCheckoutErrorMessage(submitAttempt.error.message);
+    const challengeUrl = extractCaptchaChallengeUrl(submitAttempt.error.message) ?? undefined;
     if (submitFailure === 'blocked') {
-      return ok({ status: 'blocked' });
+      return ok({ status: 'blocked', ...(challengeUrl ? { challengeUrl } : {}) });
     }
     if (submitFailure === 'access_denied') {
       return ok({ status: 'access_denied' });

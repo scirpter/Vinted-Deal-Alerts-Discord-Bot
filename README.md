@@ -19,15 +19,21 @@ Vinted nutzt Anti-Bot- und Zugriffsschutz. Einige zustandsändernde Aktionen (in
 - Führt API-Aktionen aus, wenn möglich
 - Erkennt und unterscheidet `blocked` (Cloudflare/CAPTCHA) und `access_denied` (API-Zugriff verweigert)
 - Versucht bei `401/403` im `auto`-Backend zusätzlich einen zweiten Request über `curl`, bevor endgültig fehlgeschlagen wird
+- Erkennt DataDome-Captcha-Challenges (`captcha-delivery.com`) und versucht einmalig ein Session-Priming mit anschließendem Retry
+- Gibt bei DataDome-Blocks den konkreten Challenge-Link zurück, damit du ihn im Browser öffnen und danach den Kauf erneut auslösen kannst
 - Gibt klare, konkrete Hinweise zur Behebung (`/setup account`, Region prüfen, manuell in Vinted abschließen)
 - Erkennt auch API-`errors`-Payloads (bei HTTP 200) als echte Fehler statt stillem Fallback
 - Übernimmt `Set-Cookie` aus Vinted-Antworten in eine interne Session-Cookie-Chain und sendet sie bei Folgerequests mit
+- Berücksichtigt Cookie-Domains (`Domain=.vinted.<region>`) in der Session-Cookie-Chain für Folge-Requests auf Subdomains
 - Trennt die interne Session/Cookie-Chain pro Discord-User (Multi-Account-fähig, ohne globale Header-Kollisionen)
 - Setzt `x-anon-id` und `x-v-udt` automatisch aus Session-Headern/Cookies (kein manueller Input pro User nötig)
+- Setzt `x-datadome-clientid` automatisch aus dem `datadome`-Cookie, wenn vorhanden
 - Nutzt für API-Aktionen primär Web-Session-Auth (`access_token_web`/`refresh_token_web` Cookie + Browser-Header) und versucht bei `401/403` zusätzlich einen Authorization-Fallback
 - Nutzt bei Checkout einen Fallback ohne `pickup_point`, falls die gespeicherten Koordinaten ungültig sind
 - Versucht bei Checkout zuerst die aufgelöste Transaktions-ID und fällt bei fehlender Checkout-URL automatisch auf die ursprüngliche Item-ID zurück
 - Erkennt zusätzliche Checkout-Response-Formate (verschachtelte `purchase_id`/`next_step.url`) statt fälschlich als blockiert zu enden
+- Versucht bei fehlender `checkout_url` zusätzlich einen direkten Submit-Fallback mit den ermittelten Kauf-ID-Kandidaten (`transactionId`/`itemId`)
+- Loggt beim Submit-Fallback jeden Kauf-ID-Kandidaten inkl. Ergebnis, um Checkout-Blocks präzise zu diagnostizieren
 - Erkennt `invalid_grant` beim Token-Refresh als dauerhaft und pausiert weitere Refresh-Versuche zeitweise, bis `/setup account` erneut ausgeführt wurde
 - Benachrichtigt bei `invalid_grant` zusätzlich direkt im Abo-Kanal (mit Mention) und per DM als Best-Effort mit Cooldown
 

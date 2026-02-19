@@ -417,9 +417,12 @@ async function processSubscription(
       }
 
       if (buy.value.status === 'manual_checkout_required') {
+        const challengeHint = buy.value.challengeUrl
+          ? `\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.`
+          : '';
         try {
           await channel.send(
-            'Autokauf: Direktkauf konnte nicht finalisiert werden. Bitte schließe den Kauf manuell in Vinted ab.',
+            `Autokauf: Direktkauf konnte nicht finalisiert werden. Bitte schließe den Kauf manuell in Vinted ab.${challengeHint}`,
           );
         } catch (e: unknown) {
           if (isUnknownChannelError(e)) {
@@ -435,8 +438,13 @@ async function processSubscription(
       let message =
         'Autokauf: Kauf konnte nicht automatisch abgeschlossen werden. Bitte schließe den Kauf manuell in Vinted ab.';
       if (buy.value.status === 'blocked') {
-        message =
-          'Autokauf: durch Vinted-Schutzmaßnahmen blockiert. Bitte schließe den Kauf manuell in Vinted ab.';
+        if (buy.value.challengeUrl) {
+          message =
+            `Autokauf: durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${buy.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und starte den Kauf danach erneut.`;
+        } else {
+          message =
+            'Autokauf: durch Vinted-Schutzmaßnahmen blockiert. Bitte schließe den Kauf manuell in Vinted ab.';
+        }
       } else if (buy.value.status === 'access_denied') {
         message =
           'Autokauf: Vinted verweigert Checkout für dieses Konto (access_denied). Das ist meist eine Vinted-Konto/IP-Sperre für API-Aktionen; ein frischer `refresh_token_web` hilft nicht immer.';

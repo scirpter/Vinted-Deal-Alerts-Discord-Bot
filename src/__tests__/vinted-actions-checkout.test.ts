@@ -131,6 +131,36 @@ describe('attemptCheckoutBuild', () => {
     expect(res.value).toEqual({ status: 'blocked' });
   });
 
+  it('returns blocked with challenge url when checkout build reports captcha delivery url', async () => {
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=challenge-1';
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null, challengeUrl }));
+
+    const deps = createDeps({
+      buildCheckout,
+      getAccountForUser: () =>
+        Promise.resolve(
+          ok({
+            region: 'de',
+            encryptedRefreshToken: 'encrypted',
+            pickupPoint: null,
+          }),
+        ),
+    });
+
+    const res = await attemptCheckoutBuild({ discordUserId: 'u1', itemId: 4n }, deps);
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({
+      status: 'blocked',
+      source: 'missing_checkout_url',
+      purchaseIdCandidates: [4n],
+      challengeUrl,
+    });
+  });
+
   it('returns access_denied when Vinted denies checkout API access', async () => {
     const buildCheckout = vi.fn().mockResolvedValueOnce(
       err({
@@ -193,6 +223,33 @@ describe('attemptCheckoutBuild', () => {
     expect(buildCheckout.mock.calls[0]?.[0].itemId).toBe(777n);
     expect(buildCheckout.mock.calls[1]?.[0].itemId).toBe(777n);
     expect(buildCheckout.mock.calls[2]?.[0].itemId).toBe(123n);
+  });
+
+  it('returns blocked with merged purchase id candidates when both checkout ids miss checkout_url', async () => {
+    const createConversationTransaction = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ transactionId: 777n }));
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }));
+
+    const deps = createDeps({ createConversationTransaction, buildCheckout });
+    const res = await attemptCheckoutBuild(
+      { discordUserId: 'u1', itemId: 123n, sellerUserId: 456 },
+      deps,
+    );
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value.status).toBe('blocked');
+    if (res.value.status !== 'blocked') return;
+    expect(res.value.source).toBe('fallback_missing_checkout_url');
+    expect(new Set((res.value.purchaseIdCandidates ?? []).map((candidate) => candidate.toString()))).toEqual(
+      new Set(['777', '123']),
+    );
   });
 });
 
@@ -259,6 +316,90 @@ describe('attemptInstantBuy', () => {
     expect(res.isOk()).toBe(true);
     if (res.isErr()) return;
     expect(res.value).toEqual({ status: 'blocked' });
+  });
+
+  it('propagates challenge url when submit endpoint is blocked by captcha delivery', async () => {
+    const challengeUrl = 'https://geo.captcha-delivery.com/captcha/?cid=challenge-submit';
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: 'https://www.vinted.de/checkout?purchase_id=1004' }));
+    const submitCheckoutPurchase = vi.fn().mockResolvedValueOnce(
+      err({
+        message: `Vinted request blocked by DataDome challenge. Open this URL in your browser and retry: ${challengeUrl}`,
+      }),
+    );
+    const deps = createInstantBuyDeps({ buildCheckout, submitCheckoutPurchase });
+
+    const res = await attemptInstantBuy({ discordUserId: 'u1', itemId: 15n }, deps);
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({ status: 'blocked', challengeUrl });
+  });
+
+  it('tries direct submit fallback when checkout build has no checkout_url', async () => {
+    const createConversationTransaction = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ transactionId: 888n }));
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }));
+    const submitCheckoutPurchase = vi.fn().mockImplementation((input: { purchaseId: bigint }) => {
+      if (input.purchaseId === 888n) {
+        return Promise.resolve(ok({ purchased: true }));
+      }
+      return Promise.resolve(err({ message: 'Vinted request failed (404). No purchase found.' }));
+    });
+
+    const deps = createInstantBuyDeps({
+      createConversationTransaction,
+      buildCheckout,
+      submitCheckoutPurchase,
+    });
+
+    const res = await attemptInstantBuy({ discordUserId: 'u1', itemId: 12n, sellerUserId: 42 }, deps);
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({ status: 'purchased' });
+    expect(submitCheckoutPurchase).toHaveBeenCalled();
+    const attemptedPurchaseIds = new Set(
+      submitCheckoutPurchase.mock.calls
+        .map((call) => call[0]?.purchaseId)
+        .filter((value): value is bigint => typeof value === 'bigint')
+        .map((value) => value.toString()),
+    );
+    expect(attemptedPurchaseIds.has('888')).toBe(true);
+  });
+
+  it('maps unknown submit fallback errors to manual_checkout_required after blocked build', async () => {
+    const createConversationTransaction = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ transactionId: 999n }));
+    const buildCheckout = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }))
+      .mockResolvedValueOnce(ok({ checkoutUrl: null }));
+    const submitCheckoutPurchase = vi
+      .fn()
+      .mockResolvedValue(err({ message: 'Vinted request failed (404). No purchase found.' }));
+
+    const deps = createInstantBuyDeps({
+      createConversationTransaction,
+      buildCheckout,
+      submitCheckoutPurchase,
+    });
+
+    const res = await attemptInstantBuy({ discordUserId: 'u1', itemId: 12n, sellerUserId: 42 }, deps);
+
+    expect(res.isOk()).toBe(true);
+    if (res.isErr()) return;
+    expect(res.value).toEqual({ status: 'manual_checkout_required' });
   });
 });
 

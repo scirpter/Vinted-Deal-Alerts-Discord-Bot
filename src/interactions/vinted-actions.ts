@@ -110,13 +110,22 @@ export async function handleListingActionButton(interaction: ButtonInteraction) 
     }
 
     if (res.value.status === 'manual_checkout_required') {
+      const challengeHint = res.value.challengeUrl
+        ? `\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".`
+        : '';
       await interaction.editReply(
-        'Direktkauf konnte nicht finalisiert werden. Vinted verlangt für diesen Kauf weiterhin den manuellen Abschluss in App/Web.',
+        `Direktkauf konnte nicht finalisiert werden. Vinted verlangt für diesen Kauf weiterhin den manuellen Abschluss in App/Web.${challengeHint}`,
       );
       return;
     }
 
     if (res.value.status === 'blocked') {
+      if (res.value.challengeUrl) {
+        await interaction.editReply(
+          `Checkout wird durch Vinted-Schutzmaßnahmen blockiert.\nDataDome-Challenge-Link: ${res.value.challengeUrl}\nÖffne den Link im Browser, löse die Challenge und versuche danach erneut "Jetzt kaufen".`,
+        );
+        return;
+      }
       await interaction.editReply(
         'Checkout wird aktuell durch Vinted-Schutzmaßnahmen blockiert. Bitte schließe den Kauf in Vinted ab.',
       );
