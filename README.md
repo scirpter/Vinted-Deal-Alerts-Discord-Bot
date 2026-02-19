@@ -1,4 +1,4 @@
-﻿# Kreziax (Vinted Deal-Alerts) - Discord-Bot
+﻿# Vinted Deal-Alerts - Discord-Bot
 
 Multi-Guild, privater Vinted-Monitoring-Bot (pro Nutzer), der neue passende Angebote als Embeds in dedizierte Discord-Kanäle postet - mit Action-Buttons.
 
